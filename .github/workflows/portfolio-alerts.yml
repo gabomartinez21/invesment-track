@@ -4,6 +4,8 @@ on:
   schedule:
     # Lunes 13:30 UTC = Lunes 08:30 Lima (UTC-5) test
     - cron: "30 13 * * 1"
+    - cron: "0 15 * * 1-5"   # 10:00 Lima (L-V)
+    - cron: "30 19 * * 1-5"  # 14:30 Lima (L-V)
   workflow_dispatch: {}
 
 jobs:
