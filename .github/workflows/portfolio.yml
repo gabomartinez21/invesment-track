@@ -2,7 +2,7 @@ name: Portfolio Alerts
 
 on:
   schedule:
-    # Lunes 13:30 UTC = Lunes 08:30 Lima (UTC-5)
+    # Lunes 13:30 UTC = Lunes 08:30 Lima (UTC-5) test
     - cron: "30 13 * * 1"
   workflow_dispatch: {}
 
