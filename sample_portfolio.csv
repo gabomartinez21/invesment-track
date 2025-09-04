@@ -1,0 +1,5 @@
+Ticker,Qty,AvgCost,BuyBelow,SellAbove,Notes
+SPYG,2.5,77.20,75,90,Base estable
+AAPL,1,228.10,225,245,
+GOOGL,0.8,207.00,205,235,
+V,0.3,345.00,340,380,Largo plazo
