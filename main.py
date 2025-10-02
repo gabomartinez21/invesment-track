@@ -123,14 +123,6 @@ def main():
     df = load_portfolio(CSV_URL)
     prices = fetch_prices(df["Ticker"].tolist())
     rows, actions = evaluate(df, prices)
-    # print("DEBUG >>> DataFrame:")
-    # print(df.head().to_string(index=False))
-    # print("DEBUG >>> Precios obtenidos:")
-    # for t, info in prices.items():
-    #     print(t, info)
-    # print("DEBUG >>> Señales detectadas:")
-    # for a in actions:
-    #     print(a["Ticker"], a["Signal"], a["Price"], a["BuyBelow"], a["SellAbove"])
     if not actions:
         print("Sin señales — no se envía email.")
         return
