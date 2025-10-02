@@ -129,6 +129,7 @@ def main():
     for t in tickers:
         company = get_company_name(t)
         price = fetch_price(t)
+        news = fetch_headlines_for(t, company)
         news = filter_articles(news)
         total_relevant_news += len(news)
         digest = build_llm_digest(t, company, price, news)
