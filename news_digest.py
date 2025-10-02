@@ -33,20 +33,38 @@ def get_company_name(ticker: str) -> str:
         return ticker
 
 def fetch_price(ticker: str) -> float:
+    """
+    Intenta obtener el precio actual del ticker con varios métodos,
+    devolviendo 0.0 solo si todos fallan.
+    """
     try:
         t = yf.Ticker(ticker)
         price = None
+
+        # 1) fast_info
         fi = getattr(t, "fast_info", None) or {}
         price = fi.get("last_price") or fi.get("last_price_raw")
+
+        # 2) info fallback
         if not price:
             info = t.info or {}
-            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+
+        # 3) history fallback
         if not price:
-            hist = t.history(period="1d")
+            hist = t.history(period="5d", interval="1d")
             if not hist.empty:
                 price = float(hist["Close"].iloc[-1])
-        return float(price or 0.0)
-    except Exception:
+
+        # 4) Another fallback with intraday if still none
+        if not price:
+            hist = t.history(period="1d", interval="5m")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+
+        return float(price) if price else 0.0
+    except Exception as e:
+        print(f"Error obteniendo precio para {ticker}: {e}")
         return 0.0
 
 def google_news_feed(query: str, lang="es-419", gl="PE"):
