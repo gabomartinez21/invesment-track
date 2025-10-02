@@ -32,6 +32,26 @@ def get_company_name(ticker: str) -> str:
     except Exception:
         return ticker
 
+def fetch_price_yahoo_http(ticker: str) -> float:
+    """
+    Fallback por HTTP directo a Yahoo Finance quote API.
+    """
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        resp = requests.get(url, params={"symbols": ticker}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        result = ((data or {}).get("quoteResponse") or {}).get("result") or []
+        if result:
+            q = result[0]
+            for k in ("regularMarketPrice", "postMarketPrice", "preMarketPrice"):
+                v = q.get(k)
+                if v is not None:
+                    return float(v)
+    except Exception:
+        pass
+    return 0.0
+
 def fetch_price(ticker: str) -> float:
     """
     Intenta obtener el precio actual del ticker con varios métodos,
@@ -42,25 +62,41 @@ def fetch_price(ticker: str) -> float:
         price = None
 
         # 1) fast_info
-        fi = getattr(t, "fast_info", None) or {}
-        price = fi.get("last_price") or fi.get("last_price_raw")
+        try:
+            fi = getattr(t, "fast_info", None) or {}
+            price = fi.get("last_price") or fi.get("last_price_raw")
+        except Exception:
+            price = None
 
         # 2) info fallback
         if not price:
-            info = t.info or {}
-            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            try:
+                info = t.info or {}
+                price = info.get("currentPrice") or info.get("regularMarketPrice")
+            except Exception:
+                price = None
 
-        # 3) history fallback
+        # 3) history (daily)
         if not price:
-            hist = t.history(period="5d", interval="1d")
-            if not hist.empty:
-                price = float(hist["Close"].iloc[-1])
+            try:
+                hist = t.history(period="5d", interval="1d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception:
+                price = None
 
-        # 4) Another fallback with intraday if still none
+        # 4) history (intraday)
         if not price:
-            hist = t.history(period="1d", interval="5m")
-            if not hist.empty:
-                price = float(hist["Close"].iloc[-1])
+            try:
+                hist = t.history(period="1d", interval="5m")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            except Exception:
+                price = None
+
+        # 5) HTTP fallback Yahoo
+        if not price:
+            price = fetch_price_yahoo_http(ticker)
 
         return float(price) if price else 0.0
     except Exception as e:
@@ -103,22 +139,27 @@ def build_llm_digest(ticker: str, company: str, price: float, articles: list):
     bullets = [f"- {a['title']} ({a['source']}) — {a['link']}" for a in articles] or ["- (Sin titulares relevantes en las últimas 24h)"]
     news_block = "\n".join(bullets)
     prompt = f"""
-Eres un analista financiero. Resume en español, en tono ejecutivo:
+Eres un analista financiero. Resume en español, en tono ejecutivo y **NO inventes**.
 
 Contexto:
 - Ticker: {ticker}
 - Empresa: {company}
-- Precio aprox actual: ${price:.2f}
+- Precio aprox actual: {"N/D" if price <= 0 else f"${price:.2f}"}
 
 Titulares (últimas 24h):
 {news_block}
 
-Entregables (máximo 140-170 palabras):
+Instrucciones estrictas:
+- Si NO hay titulares relevantes y el precio es N/D o 0, la **Recomendación del día debe ser: Mantener** (no asumas suspensión ni problemas).
+- Evita conclusiones basadas en precio 0.0; trátalo como dato no disponible.
+- Sé conciso (140–170 palabras en total).
+
+Entregables:
 1) Resumen del día (1 párrafo).
 2) Recomendación del día: Compra / Mantener / Vender (elige solo una) + razón breve.
 3) Riesgos o catalizadores próximos (bullet corto si aplica).
 
-Responde en Markdown y menciona la fuente entre paréntesis.
+Responde en Markdown y menciona la fuente entre paréntesis cuando corresponda.
 """
     r = client.chat.completions.create(
         model=OPENAI_MODEL,
@@ -151,7 +192,8 @@ def main():
         news = filter_articles(news)
         total_relevant_news += len(news)
         digest = build_llm_digest(t, company, price, news)
-        sections.append(f"### {t} — {company} (≈ ${price:.2f})\n{digest}")
+        price_str = "N/D" if price <= 0 else f"${price:.2f}"
+        sections.append(f"### {t} — {company} (≈ {price_str})\n{digest}")
 
     # Anti-spam: sólo enviar si hubo al menos 1 titular relevante
     if total_relevant_news == 0:
