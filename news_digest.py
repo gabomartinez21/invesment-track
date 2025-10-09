@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 from email.message import EmailMessage
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from openai import OpenAI
 
 # Secrets / env
@@ -15,6 +16,8 @@ SMTP_USER  = os.environ.get("SMTP_USER", FROM_EMAIL)
 SMTP_PASS  = os.environ["SMTP_PASS"]
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 MAX_ARTICLES_PER_TICKER = int(os.environ.get("MAX_ARTICLES_PER_TICKER", "4"))
+SEND_LOCAL_TZ = os.environ.get("SEND_LOCAL_TZ", "America/Lima")
+SEND_AT_HHMM  = os.environ.get("SEND_AT_HHMM", "08:45")  # formato 24h HH:MM
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
@@ -108,7 +111,34 @@ def google_news_feed(query: str, lang="es-419", gl="PE"):
     return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={gl}&ceid=PE:es-419"
 
 def fetch_headlines_for(ticker: str, company: str):
-    url = google_news_feed(f'{ticker} OR "{company}"')
+    # Desambiguación y sesgo financiero para evitar ruido (ej. APP en Perú, SoFi Stadium, etc.)
+    positive_terms = [
+        "stock", "acciones", "share", "shares", "earnings", "resultados", "guidance",
+        "revenue", "ingresos", "EPS", "SEC", "NYSE", "NASDAQ", "dividend", "dividendo",
+        "quarter", "Q1", "Q2", "Q3", "Q4", "rating", "downgrade", "upgrade"
+    ]
+    negative_terms = [
+        '"SoFi Stadium"', "estadio SoFi", '"Alianza para el Progreso"', "APP Perú",
+        "partido político", "fútbol", "Liga 1", "selección peruana"
+    ]
+    # Reglas específicas por ticker (desambiguación de nombre)
+    ticker_alias = {
+        "APP": ["AppLovin"],
+        "SOFI": ["SoFi Technologies"],
+        "V": ["Visa Inc"],
+        "GE": ["General Electric"],
+        "PG": ["Procter & Gamble"],
+        "MSFT": ["Microsoft"],
+        "AAPL": ["Apple"],
+        "GOOGL": ["Alphabet", "Google"],
+        "SPYG": ["SPDR Portfolio S&amp;P 500 Growth", "S&amp;P 500 Growth"],
+        "VOO": ["Vanguard S&amp;P 500 ETF"]
+    }
+    musts = [ticker, f'"{company}"'] + [f'"{a}"' for a in ticker_alias.get(ticker, [])]
+    positives = " OR ".join(positive_terms)
+    negatives = " ".join([f'-{t}' for t in negative_terms])
+    composed = f'({" OR ".join(musts)}) ({positives}) {negatives}'
+    url = google_news_feed(composed)
     feed = feedparser.parse(url)
     items = []
     for e in feed.entries[:MAX_ARTICLES_PER_TICKER]:
@@ -120,46 +150,100 @@ def fetch_headlines_for(ticker: str, company: str):
         items.append({"title": title, "link": link, "source": source or "", "summary": summary, "published": published})
     return items
 
-def filter_articles(articles: list):
+def filter_articles(articles: list, ticker: str, company: str):
     """
-    Filtra titulares irrelevantes/ruidosos (p. ej., patrocinados u opinión).
-    Mantiene el mismo formato de diccionarios de fetch_headlines_for.
+    Filtra titulares irrelevantes/ruidosos:
+    - Excluye patrocinados/opinión
+    - Excluye deportes/entretenimiento/estadios
+    - Requiere que el título o resumen mencione el ticker, la empresa o términos financieros clave
     """
     BAD_TOKENS = ("patrocinado", "sponsored", "opinión", "opinion", "op-ed", "advertorial")
+    NOISE_TOKENS = ("SoFi Stadium", "estadio SoFi", "fútbol", "partido político", "celebridad")
+    FINANCE_HINTS = ("earnings", "resultados", "guidance", "ingresos", "revenue", "EPS",
+                     "dividend", "dividendo", "rating", "NASDAQ", "NYSE", "SEC", "acciones", "acciones de")
     out = []
+    t_low = (ticker or "").lower()
+    c_low = (company or "").lower()
     for a in articles:
-        title = (a.get("title") or "").lower()
-        if any(tok in title for tok in BAD_TOKENS):
+        title = (a.get("title") or "")
+        summ  = (a.get("summary") or "")
+        lt = title.lower()
+        ls = summ.lower()
+        if any(tok in lt for tok in BAD_TOKENS):
             continue
-        out.append(a)
+        if any(tok.lower() in lt for tok in NOISE_TOKENS):
+            continue
+        has_entity = (t_low in lt) or (c_low in lt) or (t_low in ls) or (c_low in ls)
+        has_fin = any(h in lt or h in ls for h in FINANCE_HINTS)
+        if has_entity or has_fin:
+            out.append(a)
     return out
+def fetch_prev_close(ticker: str) -> float:
+    """
+    Obtiene el precio de cierre del día anterior. Intenta con yfinance (history) y
+    si falla devuelve 0.0.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="10d", interval="1d")
+        if not hist.empty:
+            if len(hist["Close"]) >= 2:
+                return float(hist["Close"].iloc[-2])
+            else:
+                return float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+    return 0.0
+
+def should_send_now(tz_name: str, hhmm: str) -> bool:
+    """
+    Solo envía si la hora local es igual o posterior a HH:MM en el día actual.
+    """
+    try:
+        hh, mm = hhmm.split(":")
+        target_h = int(hh); target_m = int(mm)
+    except Exception:
+        target_h, target_m = 8, 45
+    now = datetime.now(ZoneInfo(tz_name))
+    if now.hour > target_h:
+        return True
+    if now.hour == target_h and now.minute >= target_m:
+        return True
+    return False
 
 
-def build_llm_digest(ticker: str, company: str, price: float, articles: list):
+def build_llm_digest(ticker: str, company: str, price: float, prev_close: float, articles: list):
     bullets = [f"- {a['title']} ({a['source']}) — {a['link']}" for a in articles] or ["- (Sin titulares relevantes en las últimas 24h)"]
     news_block = "\n".join(bullets)
+    price_line = "N/D" if price <= 0 else f"${price:.2f}"
+    prev_line  = "N/D" if prev_close <= 0 else f"${prev_close:.2f}"
+    delta = ""
+    if price > 0 and prev_close > 0:
+        pct = ((price - prev_close) / prev_close) * 100.0
+        delta = f"{pct:+.2f}% intradía"
     prompt = f"""
 Eres un analista financiero. Resume en español, en tono ejecutivo y **NO inventes**.
 
 Contexto:
 - Ticker: {ticker}
 - Empresa: {company}
-- Precio aprox actual: {"N/D" if price <= 0 else f"${price:.2f}"}
+- Precio actual: {price_line}
+- Cierre previo: {prev_line}
+- Variación: {delta or "N/D"}
 
 Titulares (últimas 24h):
 {news_block}
 
 Instrucciones estrictas:
-- Si NO hay titulares relevantes y el precio es N/D o 0, la **Recomendación del día debe ser: Mantener** (no asumas suspensión ni problemas).
-- Evita conclusiones basadas en precio 0.0; trátalo como dato no disponible.
+- Si no hay titulares relevantes, enfócate en la acción del precio (precio actual vs cierre previo).
+- Si algún precio es N/D, dilo explícitamente y evita conclusiones basadas en datos faltantes.
 - Sé conciso (140–170 palabras en total).
+- No incluyas enlaces en el resumen, solo mención de la fuente entre paréntesis.
 
 Entregables:
 1) Resumen del día (1 párrafo).
 2) Recomendación del día: Compra / Mantener / Vender (elige solo una) + razón breve.
 3) Riesgos o catalizadores próximos (bullet corto si aplica).
-
-Responde en Markdown y menciona la fuente entre paréntesis cuando corresponda.
 """
     r = client.chat.completions.create(
         model=OPENAI_MODEL,
@@ -181,26 +265,38 @@ def send_email(subject: str, body: str):
         server.send_message(msg)
 
 def main():
+    # Ventana de envío opcional (ej. 08:45 America/Lima)
+    if not should_send_now(SEND_LOCAL_TZ, SEND_AT_HHMM):
+        print(f"Fuera de ventana de envío. Se envía a partir de {SEND_AT_HHMM} {SEND_LOCAL_TZ}.")
+        return
     df = load_portfolio(CSV_URL)
     tickers = df["Ticker"].unique().tolist()
     sections = []
-    total_relevant_news = 0
+    total_relevant_news = 0; any_price_available = False
     for t in tickers:
         company = get_company_name(t)
         price = fetch_price(t)
+        any_price_available = any_price_available or (price > 0)
+        prev_close = fetch_prev_close(t)
         news = fetch_headlines_for(t, company)
-        news = filter_articles(news)
+        news = filter_articles(news, t, company)
         total_relevant_news += len(news)
-        digest = build_llm_digest(t, company, price, news)
+        digest = build_llm_digest(t, company, price, prev_close, news)
         price_str = "N/D" if price <= 0 else f"${price:.2f}"
-        sections.append(f"### {t} — {company} (≈ {price_str})\n{digest}")
+        prev_str  = "N/D" if prev_close <= 0 else f"${prev_close:.2f}"
+        delta_str = ""
+        if price > 0 and prev_close > 0:
+            pct = ((price - prev_close) / prev_close) * 100.0
+            delta_str = f" | Prev: {prev_str} | Δ {pct:+.2f}%"
+        section_title = f"### {t} — {company} (≈ {price_str}{delta_str})"
+        sections.append(f"{section_title}\n{digest}")
 
-    # Anti-spam: sólo enviar si hubo al menos 1 titular relevante
-    if total_relevant_news == 0:
-        print("Sin titulares relevantes en las últimas 24h — no se envía email.")
+    # Enviar si hubo noticias o si hubo al menos un precio disponible (para decisión de inversión)
+    if total_relevant_news == 0 and not any_price_available:
+        print("Sin titulares relevantes y sin precios disponibles — no se envía email.")
         return
 
-    today = datetime.now().strftime("%d/%m/%Y")
+    today = datetime.now(ZoneInfo(SEND_LOCAL_TZ)).strftime("%d/%m/%Y %H:%M")
     header = f"# Noticias y Recomendación del Día — {today}\n\n"
     body = header + "\n\n---\n\n".join(sections)
     send_email(f"Noticias y señal diaria — {today}", body)
