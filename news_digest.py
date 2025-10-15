@@ -125,11 +125,14 @@ def fetch_headlines_for(ticker: str, company: str):
     ticker_alias = {
         "APP": ["AppLovin"],
         "SOFI": ["SoFi Technologies"],
-        "V": ["Visa Inc"],
+        # "V": ["Visa Inc"],
         "GE": ["General Electric"],
-        "PG": ["Procter & Gamble"],
+        # "PG": ["Procter & Gamble"],
         "MSFT": ["Microsoft"],
         "AAPL": ["Apple"],
+        "AMZN": ["Amazon"],
+        "JNJ": ["Johnson & Johnson"],
+        "MU": ["Micron Technology, Inc. - Common Stock"],
         "GOOGL": ["Alphabet", "Google"],
         "SPYG": ["SPDR Portfolio S&amp;P 500 Growth", "S&amp;P 500 Growth"],
         "VOO": ["Vanguard S&amp;P 500 ETF"]
