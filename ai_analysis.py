@@ -227,12 +227,20 @@ def get_ai_analysis(
             technical_data, fundamental_data, portfolio_context
         )
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,  # Más determinístico
-            max_tokens=600
-        )
+        # gpt-5-mini usa max_completion_tokens en vez de max_tokens
+        params = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+        }
+
+        # gpt-5-mini y modelos nuevos usan max_completion_tokens
+        if "gpt-5" in model or "gpt-4o" in model:
+            params["max_completion_tokens"] = 600
+        else:
+            params["max_tokens"] = 600
+
+        response = client.chat.completions.create(**params)
 
         full_text = response.choices[0].message.content.strip()
 

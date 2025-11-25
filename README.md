@@ -77,7 +77,7 @@ Ve a **Settings > Secrets and variables > Actions** y crea estos secrets:
 - `OPENAI_API_KEY` → Tu API key de OpenAI
 
 #### Opcionales:
-- `OPENAI_MODEL` → Modelo a usar (default: `gpt-5-mini`)
+- `OPENAI_MODEL` → Modelo a usar (default: `gpt-4o-mini`)
 - `SEND_LOCAL_TZ` → Zona horaria (default: `America/Lima`)
 - `SEND_AT_HHMM` → Hora de envío (default: `08:45`)
 - `MAX_ARTICLES_PER_SOURCE` → Artículos por fuente (default: `3`)
@@ -228,9 +228,12 @@ El sistema recomendaría:
 
 ### OpenAI
 - **Requerido**: Sí
-- **Modelo recomendado**: `gpt-5-mini` (mejor lógica)
-- **Costo estimado**: ~$0.50-1.00/mes para 4-5 acciones diarias
-- **Alternativas**: `gpt-4o-mini` o `gpt-3.5-turbo` (más económicos)
+- **Modelos recomendados**:
+  - `gpt-4o-mini` (default, económico y preciso) ~$0.50-1.00/mes
+  - `gpt-5-mini` (mejor lógica si está disponible)
+  - `gpt-3.5-turbo` (más económico, menos preciso)
+- **Costo estimado**: ~$0.50-1.00/mes para 4-5 acciones diarias con `gpt-4o-mini`
+- **Nota**: El sistema detecta automáticamente el modelo y usa los parámetros correctos
 
 ### MarketAux (Opcional)
 - **Requerido**: No
@@ -252,7 +255,13 @@ El sistema recomendaría:
 ### OpenAI da error
 - Verifica que tu API key sea válida: https://platform.openai.com/api-keys
 - Revisa que tengas créditos disponibles
-- Cambia `OPENAI_MODEL` a `gpt-4o-mini` o `gpt-3.5-turbo` si `gpt-5-mini` no está disponible
+- Si usas `gpt-5-mini` y da error de parámetros, cambia a `gpt-4o-mini` (más estable)
+- Error "max_tokens not supported": El sistema lo maneja automáticamente, actualiza el código
+
+### Rate limit de Yahoo Finance
+- El sistema tiene retry automático con delays incrementales (3s, 6s, 9s)
+- Se agrega delay de 2s entre cada acción procesada
+- Si tienes muchas acciones (>10), considera ejecutar 2 veces al día en vez de cada hora
 
 ### Análisis técnico/fundamental vacío
 - Algunos tickers (ETFs, acciones nuevas) tienen datos limitados

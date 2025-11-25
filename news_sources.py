@@ -5,6 +5,7 @@ Mejora la confiabilidad combinando Google News, Yahoo Finance y otras fuentes.
 import requests
 import feedparser
 import html
+import time
 from typing import List, Dict
 from datetime import datetime, timedelta
 
@@ -73,30 +74,39 @@ def fetch_google_news(ticker: str, company: str, max_articles: int = 4) -> List[
         print(f"Error fetching Google News for {ticker}: {e}")
         return []
 
-def fetch_yahoo_finance_news(ticker: str, max_articles: int = 3) -> List[Dict]:
+def fetch_yahoo_finance_news(ticker: str, max_articles: int = 3, max_retries: int = 3) -> List[Dict]:
     """
     Obtiene noticias directamente de Yahoo Finance para un ticker.
     """
-    try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
-        news = t.news or []
+    for attempt in range(max_retries):
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            news = t.news or []
 
-        items = []
-        for article in news[:max_articles]:
-            items.append({
-                "title": article.get("title", ""),
-                "link": article.get("link", ""),
-                "source": article.get("publisher", "Yahoo Finance"),
-                "summary": article.get("summary", ""),
-                "published": datetime.fromtimestamp(article.get("providerPublishTime", 0)).isoformat() if article.get("providerPublishTime") else "",
-                "feed": "yahoo_finance"
-            })
+            items = []
+            for article in news[:max_articles]:
+                items.append({
+                    "title": article.get("title", ""),
+                    "link": article.get("link", ""),
+                    "source": article.get("publisher", "Yahoo Finance"),
+                    "summary": article.get("summary", ""),
+                    "published": datetime.fromtimestamp(article.get("providerPublishTime", 0)).isoformat() if article.get("providerPublishTime") else "",
+                    "feed": "yahoo_finance"
+                })
 
-        return items
-    except Exception as e:
-        print(f"Error fetching Yahoo Finance news for {ticker}: {e}")
-        return []
+            return items
+        except Exception as e:
+            if "Too Many Requests" in str(e) or "Rate limit" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    print(f"Rate limit para {ticker} (news), esperando {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            print(f"Error fetching Yahoo Finance news for {ticker}: {e}")
+            break
+
+    return []
 
 def fetch_marketaux_news(ticker: str, api_key: str = None, max_articles: int = 3) -> List[Dict]:
     """

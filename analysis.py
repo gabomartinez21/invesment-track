@@ -5,6 +5,7 @@ Provee indicadores técnicos (RSI, MACD, medias móviles) y métricas fundamenta
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 from typing import Dict, Optional
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> Optional[float]:
@@ -56,86 +57,104 @@ def calculate_volatility(prices: pd.Series, period: int = 20) -> Optional[float]
     volatility = returns.rolling(window=period).std().iloc[-1] * np.sqrt(252)  # Anualizada
     return float(volatility) if not pd.isna(volatility) else None
 
-def get_technical_analysis(ticker: str) -> Dict:
+def get_technical_analysis(ticker: str, max_retries: int = 3) -> Dict:
     """
     Obtiene análisis técnico completo para un ticker.
     Retorna diccionario con RSI, MACD, medias móviles, y volatilidad.
     """
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="1y", interval="1d")
+    for attempt in range(max_retries):
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period="1y", interval="1d")
 
-        if hist.empty:
+            if hist.empty:
+                return {
+                    "rsi": None, "macd": None, "signal": None, "histogram": None,
+                    "sma_20": None, "sma_50": None, "sma_200": None,
+                    "volatility": None, "volume_avg": None
+                }
+
+            closes = hist["Close"]
+            volumes = hist["Volume"]
+
+            # Indicadores técnicos
+            rsi = calculate_rsi(closes)
+            macd_data = calculate_macd(closes)
+            mas = calculate_moving_averages(closes)
+            vol = calculate_volatility(closes)
+
+            # Volumen promedio (últimos 20 días)
+            avg_vol = float(volumes.tail(20).mean()) if len(volumes) >= 20 else None
+
             return {
-                "rsi": None, "macd": None, "signal": None, "histogram": None,
-                "sma_20": None, "sma_50": None, "sma_200": None,
-                "volatility": None, "volume_avg": None
+                "rsi": rsi,
+                "macd": macd_data.get("macd"),
+                "signal": macd_data.get("signal"),
+                "histogram": macd_data.get("histogram"),
+                "sma_20": mas.get("sma_20"),
+                "sma_50": mas.get("sma_50"),
+                "sma_200": mas.get("sma_200"),
+                "volatility": vol,
+                "volume_avg": avg_vol
             }
+        except Exception as e:
+            if "Too Many Requests" in str(e) or "Rate limit" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3  # Espera incremental: 3s, 6s, 9s
+                    print(f"Rate limit para {ticker}, esperando {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            print(f"Error en análisis técnico para {ticker}: {e}")
+            break
 
-        closes = hist["Close"]
-        volumes = hist["Volume"]
+    return {
+        "rsi": None, "macd": None, "signal": None, "histogram": None,
+        "sma_20": None, "sma_50": None, "sma_200": None,
+        "volatility": None, "volume_avg": None
+    }
 
-        # Indicadores técnicos
-        rsi = calculate_rsi(closes)
-        macd_data = calculate_macd(closes)
-        mas = calculate_moving_averages(closes)
-        vol = calculate_volatility(closes)
-
-        # Volumen promedio (últimos 20 días)
-        avg_vol = float(volumes.tail(20).mean()) if len(volumes) >= 20 else None
-
-        return {
-            "rsi": rsi,
-            "macd": macd_data.get("macd"),
-            "signal": macd_data.get("signal"),
-            "histogram": macd_data.get("histogram"),
-            "sma_20": mas.get("sma_20"),
-            "sma_50": mas.get("sma_50"),
-            "sma_200": mas.get("sma_200"),
-            "volatility": vol,
-            "volume_avg": avg_vol
-        }
-    except Exception as e:
-        print(f"Error en análisis técnico para {ticker}: {e}")
-        return {
-            "rsi": None, "macd": None, "signal": None, "histogram": None,
-            "sma_20": None, "sma_50": None, "sma_200": None,
-            "volatility": None, "volume_avg": None
-        }
-
-def get_fundamental_data(ticker: str) -> Dict:
+def get_fundamental_data(ticker: str, max_retries: int = 3) -> Dict:
     """
     Obtiene datos fundamentales para un ticker.
     Retorna P/E ratio, dividendo, market cap, etc.
     """
-    try:
-        t = yf.Ticker(ticker)
-        info = t.info or {}
+    for attempt in range(max_retries):
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info or {}
 
-        return {
-            "pe_ratio": info.get("trailingPE"),
-            "forward_pe": info.get("forwardPE"),
-            "market_cap": info.get("marketCap"),
-            "dividend_yield": info.get("dividendYield"),
-            "beta": info.get("beta"),
-            "52w_high": info.get("fiftyTwoWeekHigh"),
-            "52w_low": info.get("fiftyTwoWeekLow"),
-            "avg_volume": info.get("averageVolume"),
-            "profit_margin": info.get("profitMargins"),
-            "revenue_growth": info.get("revenueGrowth"),
-            "eps": info.get("trailingEps"),
-            "target_price": info.get("targetMeanPrice"),
-            "recommendation": info.get("recommendationKey"),  # buy, hold, sell
-        }
-    except Exception as e:
-        print(f"Error en análisis fundamental para {ticker}: {e}")
-        return {
-            "pe_ratio": None, "forward_pe": None, "market_cap": None,
-            "dividend_yield": None, "beta": None, "52w_high": None,
-            "52w_low": None, "avg_volume": None, "profit_margin": None,
-            "revenue_growth": None, "eps": None, "target_price": None,
-            "recommendation": None
-        }
+            return {
+                "pe_ratio": info.get("trailingPE"),
+                "forward_pe": info.get("forwardPE"),
+                "market_cap": info.get("marketCap"),
+                "dividend_yield": info.get("dividendYield"),
+                "beta": info.get("beta"),
+                "52w_high": info.get("fiftyTwoWeekHigh"),
+                "52w_low": info.get("fiftyTwoWeekLow"),
+                "avg_volume": info.get("averageVolume"),
+                "profit_margin": info.get("profitMargins"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "eps": info.get("trailingEps"),
+                "target_price": info.get("targetMeanPrice"),
+                "recommendation": info.get("recommendationKey"),  # buy, hold, sell
+            }
+        except Exception as e:
+            if "Too Many Requests" in str(e) or "Rate limit" in str(e):
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3
+                    print(f"Rate limit para {ticker} (fundamental), esperando {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+            print(f"Error en análisis fundamental para {ticker}: {e}")
+            break
+
+    return {
+        "pe_ratio": None, "forward_pe": None, "market_cap": None,
+        "dividend_yield": None, "beta": None, "52w_high": None,
+        "52w_low": None, "avg_volume": None, "profit_margin": None,
+        "revenue_growth": None, "eps": None, "target_price": None,
+        "recommendation": None
+    }
 
 def interpret_technical_signals(tech: Dict, price: float) -> Dict[str, str]:
     """
