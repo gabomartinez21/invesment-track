@@ -6,26 +6,50 @@ Sistema mejorado de alertas de portfolio con:
 - Email HTML profesional
 - Prompts mejorados de OpenAI
 """
+
 import os
 import ssl
 import smtplib
 import time
-import requests
 import pandas as pd
-import yfinance as yf
 from email.message import EmailMessage
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List
 
+from dotenv import load_dotenv
+
 # Importar módulos creados
-from analysis import get_technical_analysis, get_fundamental_data, interpret_technical_signals, interpret_fundamental_signals
+from analysis import (
+    get_technical_analysis,
+    get_fundamental_data,
+    interpret_technical_signals,
+    interpret_fundamental_signals,
+)
 from portfolio import calculate_portfolio_values, generate_rebalancing_recommendation
 from news_sources import aggregate_news_from_all_sources, calculate_news_sentiment
 from ai_analysis import get_ai_analysis
 from email_template import generate_email_html
+from prices import fetch_prev_close, fetch_quotes_batch, get_company_name
 
 # Configuración
+load_dotenv()
+
+REQUIRED_ENV_VARS = [
+    "SHEET_CSV_URL",
+    "FROM_EMAIL",
+    "TO_EMAIL",
+    "SMTP_PASS",
+    "OPENAI_API_KEY",
+]
+missing_vars = [var for var in REQUIRED_ENV_VARS if not os.environ.get(var)]
+if missing_vars:
+    missing_list = ", ".join(missing_vars)
+    raise RuntimeError(
+        "Faltan variables de entorno requeridas. "
+        f"Configura estas claves en tu .env: {missing_list}"
+    )
+
 CSV_URL = os.environ["SHEET_CSV_URL"]
 FROM_EMAIL = os.environ["FROM_EMAIL"]
 TO_EMAIL = os.environ["TO_EMAIL"]
@@ -45,13 +69,72 @@ ENABLE_REBALANCING = os.environ.get("ENABLE_REBALANCING", "true").lower() == "tr
 MIN_TRADE_VALUE = float(os.environ.get("MIN_TRADE_VALUE", "100"))
 MAX_DEVIATION = float(os.environ.get("MAX_DEVIATION", "5"))
 
+
 def load_portfolio(url: str) -> pd.DataFrame:
-    """Carga el portfolio desde CSV."""
+    """Carga el portfolio desde CSV (Google Sheet publicado).
+
+    Columnas soportadas (recomendadas):
+    - Ticker (requerida)
+    - Shares o Qty (cantidad)
+    - AvgCost (costo promedio por acción, opcional)
+    - TargetWeight (peso objetivo %, opcional)
+    - Cash (monto de caja si Ticker=CASH/CASH_USD)
+    - Active (TRUE/FALSE para incluir)
+    - Notes (comentarios)
+
+    Nota: Internamente normalizamos a columna `Qty`.
+    """
     df = pd.read_csv(url, sep=None, engine="python")
     if "Ticker" not in df.columns:
         raise ValueError("Falta columna: Ticker")
+
+    df = df.copy()
     df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
-    return df[df["Ticker"]!=""]
+    df = df[df["Ticker"] != ""]
+
+    # Active
+    if "Active" not in df.columns:
+        df["Active"] = True
+    else:
+        df["Active"] = (
+            df["Active"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin(["true", "1", "yes", "y", "si", "sí"])
+        )
+
+    # Notes
+    if "Notes" not in df.columns:
+        df["Notes"] = ""
+    df["Notes"] = df["Notes"].astype(str)
+
+    # Cash
+    if "Cash" not in df.columns:
+        df["Cash"] = 0.0
+    df["Cash"] = pd.to_numeric(df["Cash"], errors="coerce").fillna(0.0)
+
+    # Qty/Shares
+    if "Qty" not in df.columns:
+        if "Shares" in df.columns:
+            df["Qty"] = df["Shares"]
+        else:
+            df["Qty"] = 0.0
+    df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0.0)
+
+    # AvgCost
+    if "AvgCost" not in df.columns:
+        df["AvgCost"] = 0.0
+    df["AvgCost"] = pd.to_numeric(df["AvgCost"], errors="coerce").fillna(0.0)
+
+    # TargetWeight
+    if "TargetWeight" in df.columns:
+        df["TargetWeight"] = pd.to_numeric(df["TargetWeight"], errors="coerce").fillna(
+            0.0
+        )
+
+    return df[df["Active"] == True]
+
 
 def should_send_now(tz_name: str, hhmm: str) -> bool:
     """Solo envía si la hora local es igual o posterior a HH:MM."""
@@ -68,99 +151,44 @@ def should_send_now(tz_name: str, hhmm: str) -> bool:
         return True
     return False
 
-def fetch_price_yahoo_http(ticker: str) -> float:
-    """Fallback por HTTP directo a Yahoo Finance quote API."""
+
+def extract_cash(df: pd.DataFrame) -> float:
+    """Extrae caja desde filas especiales (Ticker=CASH/CASH_USD) usando columna Cash."""
     try:
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        resp = requests.get(url, params={"symbols": ticker}, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        result = ((data or {}).get("quoteResponse") or {}).get("result") or []
-        if result:
-            q = result[0]
-            for k in ("regularMarketPrice", "postMarketPrice", "preMarketPrice"):
-                v = q.get(k)
-                if v is not None:
-                    return float(v)
+        cash_rows = df[df["Ticker"].isin(["CASH", "CASH_USD"])]
+        return float(cash_rows["Cash"].sum()) if not cash_rows.empty else 0.0
     except Exception:
-        pass
-    return 0.0
-
-def fetch_price(ticker: str) -> float:
-    """Intenta obtener el precio actual del ticker con varios métodos."""
-    try:
-        t = yf.Ticker(ticker)
-        price = None
-
-        # 1) fast_info
-        try:
-            fi = getattr(t, "fast_info", None) or {}
-            price = fi.get("last_price") or fi.get("last_price_raw")
-        except Exception:
-            price = None
-
-        # 2) info fallback
-        if not price:
-            try:
-                info = t.info or {}
-                price = info.get("currentPrice") or info.get("regularMarketPrice")
-            except Exception:
-                price = None
-
-        # 3) history (daily)
-        if not price:
-            try:
-                hist = t.history(period="5d", interval="1d")
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            except Exception:
-                price = None
-
-        # 4) history (intraday)
-        if not price:
-            try:
-                hist = t.history(period="1d", interval="5m")
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            except Exception:
-                price = None
-
-        # 5) HTTP fallback Yahoo
-        if not price:
-            price = fetch_price_yahoo_http(ticker)
-
-        return float(price) if price else 0.0
-    except Exception as e:
-        print(f"Error obteniendo precio para {ticker}: {e}")
         return 0.0
 
-def fetch_prev_close(ticker: str) -> float:
-    """Obtiene el precio de cierre del día anterior."""
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="10d", interval="1d")
-        if not hist.empty:
-            if len(hist["Close"]) >= 2:
-                return float(hist["Close"].iloc[-2])
-            else:
-                return float(hist["Close"].iloc[-1])
-    except Exception:
-        pass
-    return 0.0
 
-def get_company_name(ticker: str) -> str:
-    """Obtiene el nombre de la empresa."""
-    try:
-        info = yf.Ticker(ticker).info or {}
-        return info.get("shortName") or info.get("longName") or ticker
-    except Exception:
-        return ticker
+def compute_position_metrics(
+    qty: float, avg_cost: float, price: float
+) -> Dict[str, float]:
+    qty = float(qty or 0.0)
+    avg_cost = float(avg_cost or 0.0)
+    price = float(price or 0.0)
+    value = qty * price if qty > 0 and price > 0 else 0.0
+    cost = qty * avg_cost if qty > 0 and avg_cost > 0 else 0.0
+    pnl = (value - cost) if (value > 0 and cost > 0) else 0.0
+    pnl_pct = (pnl / cost * 100.0) if cost > 0 else 0.0
+    return {
+        "qty": qty,
+        "avg_cost": avg_cost,
+        "value": value,
+        "cost": cost,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+    }
+
 
 def process_stock_data(
     ticker: str,
     row: pd.Series,
     prices: Dict[str, float],
-    portfolio_df: pd.DataFrame
+    prev_closes: Dict[str, float],
+    portfolio_df: pd.DataFrame,
+    cash_available: float,
+    total_portfolio_value: float,
 ) -> Dict:
     """
     Procesa toda la información de una acción: precio, noticias, análisis técnico/fundamental.
@@ -170,12 +198,41 @@ def process_stock_data(
     # Información básica
     company = get_company_name(ticker)
     price = prices.get(ticker, 0.0)
-    prev_close = fetch_prev_close(ticker)
+    prev_close = prev_closes.get(ticker)
+    if prev_close is None:
+        prev_close = fetch_prev_close(ticker)
 
     # Cambio porcentual
     change_pct = 0.0
     if price > 0 and prev_close > 0:
         change_pct = ((price - prev_close) / prev_close) * 100.0
+
+    # Contexto de portfolio (para personalizar análisis + rebalancing)
+    qty = float(row.get("Qty", 0) or 0.0)
+    avg_cost = float(row.get("AvgCost", 0) or 0.0)
+    pos = compute_position_metrics(qty, avg_cost, price)
+
+    current_weight = (
+        (pos["value"] / total_portfolio_value * 100.0)
+        if total_portfolio_value > 0
+        else 0.0
+    )
+    target_weight = (
+        float(row.get("TargetWeight", 0) or 0.0) if "TargetWeight" in row.index else 0.0
+    )
+
+    portfolio_context = {
+        "quantity": pos["qty"],
+        "avg_cost": pos["avg_cost"],
+        "position_value": pos["value"],
+        "position_cost": pos["cost"],
+        "pnl": pos["pnl"],
+        "pnl_pct": pos["pnl_pct"],
+        "current_weight": current_weight,
+        "target_weight": target_weight,
+        "cash_available": float(cash_available or 0.0),
+        "notes": str(row.get("Notes", "") or ""),
+    }
 
     # Análisis técnico
     technical_data = get_technical_analysis(ticker)
@@ -187,25 +244,12 @@ def process_stock_data(
 
     # Noticias de múltiples fuentes
     articles = aggregate_news_from_all_sources(
-        ticker, company,
+        ticker,
+        company,
         max_per_source=MAX_ARTICLES_PER_SOURCE,
-        marketaux_api_key=MARKETAUX_API_KEY
+        marketaux_api_key=MARKETAUX_API_KEY,
     )
     news_sentiment = calculate_news_sentiment(articles)
-
-    # Contexto de portfolio (para rebalancing)
-    portfolio_context = None
-    if "TargetWeight" in row.index and row.get("TargetWeight"):
-        total_value = sum(prices.get(t, 0) * portfolio_df[portfolio_df["Ticker"] == t]["Qty"].iloc[0]
-                         for t in portfolio_df["Ticker"] if t in prices)
-        current_value = price * row.get("Qty", 0)
-        current_weight = (current_value / total_value * 100) if total_value > 0 else 0
-
-        portfolio_context = {
-            "current_weight": current_weight,
-            "target_weight": row.get("TargetWeight", 0),
-            "quantity": row.get("Qty", 0)
-        }
 
     # Análisis con OpenAI (mejorado)
     ai_result = get_ai_analysis(
@@ -218,7 +262,7 @@ def process_stock_data(
         fundamental_data=fundamental_data,
         portfolio_context=portfolio_context,
         model=OPENAI_MODEL,
-        api_key=OPENAI_API_KEY
+        api_key=OPENAI_API_KEY,
     )
 
     return {
@@ -227,6 +271,17 @@ def process_stock_data(
         "price": price,
         "prev_close": prev_close,
         "change_pct": change_pct,
+        "quantity": pos.get("qty", 0.0),
+        "avg_cost": pos.get("avg_cost", 0.0),
+        "position_value": pos.get("value", 0.0),
+        "pnl": pos.get("pnl", 0.0),
+        "pnl_pct": pos.get("pnl_pct", 0.0),
+        "current_weight": portfolio_context.get("current_weight", 0.0)
+        if portfolio_context
+        else 0.0,
+        "target_weight": portfolio_context.get("target_weight", 0.0)
+        if portfolio_context
+        else 0.0,
         "recommendation": ai_result.get("recommendation", "MANTENER"),
         "news_summary": ai_result.get("full_text", "Sin análisis disponible"),
         "technical_summary": tech_signals.get("summary", ""),
@@ -236,8 +291,9 @@ def process_stock_data(
         "news_sentiment": news_sentiment,
         "technical_data": technical_data,
         "fundamental_data": fundamental_data,
-        "rebalance_action": ""  # Se llenará después
+        "rebalance_action": "",  # Se llenará después
     }
+
 
 def send_email_html(subject: str, html_body: str):
     """Envía email con formato HTML."""
@@ -254,6 +310,7 @@ def send_email_html(subject: str, html_body: str):
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
 
+
 def main():
     print(f"Iniciando análisis de portfolio mejorado...")
 
@@ -265,30 +322,63 @@ def main():
     # Cargar portfolio
     portfolio_df = load_portfolio(CSV_URL)
 
-    # Asegurarse de que exista la columna TargetWeight
-    if "TargetWeight" not in portfolio_df.columns:
-        # Si no existe, distribuir equitativamente
-        portfolio_df["TargetWeight"] = 100.0 / len(portfolio_df)
-        print("Nota: No se encontró columna 'TargetWeight', usando distribución equitativa.")
+    cash_available = extract_cash(portfolio_df)
 
-    tickers = portfolio_df["Ticker"].unique().tolist()
+    # Excluir filas de caja del análisis de tickers
+    positions_df = portfolio_df[
+        ~portfolio_df["Ticker"].isin(["CASH", "CASH_USD"])
+    ].copy()
+
+    if "Qty" not in positions_df.columns:
+        positions_df["Qty"] = 0.0
+
+    # Asegurarse de que exista la columna TargetWeight
+    if "TargetWeight" not in positions_df.columns:
+        # Si no existe, distribuir equitativamente SOLO entre posiciones
+        positions_df["TargetWeight"] = 100.0 / max(len(positions_df), 1)
+        print(
+            "Nota: No se encontró columna 'TargetWeight', usando distribución equitativa."
+        )
+
+    tickers = positions_df["Ticker"].unique().tolist()
 
     # Obtener precios
     print("Obteniendo precios...")
-    prices = {ticker: fetch_price(ticker) for ticker in tickers}
+    quotes = fetch_quotes_batch(tickers)
+    prices = {
+        ticker: (quotes.get(ticker, {}).get("price") or 0.0) for ticker in tickers
+    }
+    prev_closes = {
+        ticker: quotes.get(ticker, {}).get("prev_close") for ticker in tickers
+    }
+
+    total_portfolio_value = sum(
+        (prices.get(t, 0.0) or 0.0)
+        * float(positions_df[positions_df["Ticker"] == t]["Qty"].iloc[0] or 0.0)
+        for t in tickers
+        if (prices.get(t, 0.0) or 0.0) > 0
+    )
 
     # Procesar cada acción
     print("Analizando cada acción...")
     stocks_data = []
 
     for idx, ticker in enumerate(tickers):
-        row = portfolio_df[portfolio_df["Ticker"] == ticker].iloc[0]
-        stock_data = process_stock_data(ticker, row, prices, portfolio_df)
+        row = positions_df[positions_df["Ticker"] == ticker].iloc[0]
+        stock_data = process_stock_data(
+            ticker,
+            row,
+            prices,
+            prev_closes,
+            positions_df,
+            cash_available,
+            total_portfolio_value,
+        )
         stocks_data.append(stock_data)
 
         # Delay para evitar rate limit de Yahoo Finance (excepto en la última)
         if idx < len(tickers) - 1:
-            time.sleep(2)  # 2 segundos entre requests
+            time.sleep(8)  # 8 segundos entre requests
 
     # Rebalancing (si está habilitado)
     rebalancing_actions = []
@@ -300,10 +390,10 @@ def main():
         fund_data_map = {s["ticker"]: s["fundamental_data"] for s in stocks_data}
 
         rebalancing_actions, rebal_summary = generate_rebalancing_recommendation(
-            holdings=portfolio_df,
+            holdings=positions_df,
             prices=prices,
             technical_data=tech_data_map,
-            fundamental_data=fund_data_map
+            fundamental_data=fund_data_map,
         )
 
         # Agregar acciones de rebalanceo a cada stock
@@ -311,25 +401,43 @@ def main():
             ticker = action["ticker"]
             for stock in stocks_data:
                 if stock["ticker"] == ticker:
-                    stock["rebalance_action"] = f"{action['action']} {action['qty']:.2f} acciones ({action['reason']})"
+                    stock["rebalance_action"] = (
+                        f"{action['action']} {action['qty']:.2f} acciones ({action['reason']})"
+                    )
                     break
 
         print(f"Rebalanceo: {rebal_summary}")
 
     # Calcular resumen del portfolio
-    total_value = sum(s["price"] * portfolio_df[portfolio_df["Ticker"] == s["ticker"]]["Qty"].iloc[0]
-                     for s in stocks_data if s["price"] > 0)
+    total_value = sum(
+        s["price"]
+        * float(
+            positions_df[positions_df["Ticker"] == s["ticker"]]["Qty"].iloc[0] or 0.0
+        )
+        for s in stocks_data
+        if s["price"] > 0
+    )
 
-    total_prev_value = sum(s["prev_close"] * portfolio_df[portfolio_df["Ticker"] == s["ticker"]]["Qty"].iloc[0]
-                           for s in stocks_data if s["prev_close"] > 0)
+    total_prev_value = sum(
+        s["prev_close"]
+        * float(
+            positions_df[positions_df["Ticker"] == s["ticker"]]["Qty"].iloc[0] or 0.0
+        )
+        for s in stocks_data
+        if s["prev_close"] > 0
+    )
 
     day_change = total_value - total_prev_value
-    day_change_pct = (day_change / total_prev_value * 100) if total_prev_value > 0 else 0
+    day_change_pct = (
+        (day_change / total_prev_value * 100) if total_prev_value > 0 else 0
+    )
 
     portfolio_summary = {
         "total_value": total_value,
+        "cash_available": float(cash_available or 0.0),
+        "net_worth": float(total_value + (cash_available or 0.0)),
         "day_change": day_change,
-        "day_change_pct": day_change_pct
+        "day_change_pct": day_change_pct,
     }
 
     # Verificar si hay información para enviar
@@ -346,7 +454,7 @@ def main():
         stocks_data=stocks_data,
         rebalancing_actions=rebalancing_actions if ENABLE_REBALANCING else None,
         portfolio_summary=portfolio_summary,
-        timestamp=timestamp
+        timestamp=timestamp,
     )
 
     # Enviar email
@@ -357,6 +465,7 @@ def main():
     print(f"  - {len(stocks_data)} acciones analizadas")
     print(f"  - {total_news} noticias procesadas")
     print(f"  - Portfolio: ${total_value:,.2f} ({day_change_pct:+.2f}%)")
+
 
 if __name__ == "__main__":
     main()

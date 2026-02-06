@@ -40,6 +40,8 @@ def generate_stock_table_html(stocks_data: List[Dict]) -> str:
 
     stocks_data debe contener:
     - ticker, company, price, prev_close, change_pct
+    - quantity, avg_cost, position_value, pnl, pnl_pct
+    - current_weight, target_weight
     - recommendation, news_summary, technical_summary, fundamental_summary, risks
     """
     rows_html = []
@@ -57,15 +59,44 @@ def generate_stock_table_html(stocks_data: List[Dict]) -> str:
         risks = stock.get("risks", "")
         rebalance_action = stock.get("rebalance_action", "")
 
+        # Datos de portfolio
+        quantity = stock.get("quantity", 0)
+        avg_cost = stock.get("avg_cost", 0)
+        position_value = stock.get("position_value", 0)
+        pnl = stock.get("pnl", 0)
+        pnl_pct = stock.get("pnl_pct", 0)
+        current_weight = stock.get("current_weight", 0)
+        target_weight = stock.get("target_weight", 0)
+
         price_str = format_currency(price)
         prev_str = format_currency(prev_close)
         change_str = format_percentage(change_pct)
         change_color = get_color_for_change(change_pct)
         rec_badge = get_recommendation_badge(recommendation)
 
+        # Formateo de datos de portfolio
+        qty_str = f"{quantity:.2f}" if quantity else "0"
+        avg_cost_str = format_currency(avg_cost)
+        value_str = format_currency(position_value)
+        pnl_str = format_currency(pnl)
+        pnl_pct_str = format_percentage(pnl_pct)
+        pnl_color = get_color_for_change(pnl_pct)
+        weight_str = f"{current_weight:.1f}%" if current_weight else "0%"
+        target_str = f"{target_weight:.1f}%" if target_weight else "0%"
+
+        # Indicador de peso vs objetivo
+        weight_status = ""
+        if current_weight and target_weight:
+            diff = current_weight - target_weight
+            if abs(diff) > 2:  # Diferencia significativa (>2%)
+                if diff > 0:
+                    weight_status = f'<span style="color: #ff6600; font-size: 11px;">↑ Sobreponderado</span>'
+                else:
+                    weight_status = f'<span style="color: #0066cc; font-size: 11px;">↓ Subponderado</span>'
+
         row = f"""
         <tr>
-            <td style="padding: 16px; border-bottom: 1px solid #dee2e6; font-weight: bold; color: #0066cc;">
+            <td style="padding: 16px; border-bottom: 1px solid #dee2e6; font-weight: bold; color: #0066cc; vertical-align: top;">
                 {ticker}
             </td>
             <td style="padding: 16px; border-bottom: 1px solid #dee2e6;">
@@ -73,13 +104,22 @@ def generate_stock_table_html(stocks_data: List[Dict]) -> str:
                 <small style="color: #666;">Precio: {price_str} | Ayer: {prev_str}</small><br>
                 <span style="color: {change_color}; font-weight: bold;">{change_str}</span>
             </td>
-            <td style="padding: 16px; border-bottom: 1px solid #dee2e6; text-align: center;">
+            <td style="padding: 16px; border-bottom: 1px solid #dee2e6; background-color: #f8f9fa;">
+                <div style="font-size: 13px; line-height: 1.6;">
+                    <div><strong>Acciones:</strong> {qty_str}</div>
+                    <div><strong>Costo prom:</strong> {avg_cost_str}</div>
+                    <div><strong>Valor:</strong> {value_str}</div>
+                    <div style="color: {pnl_color};"><strong>P&L:</strong> {pnl_str} ({pnl_pct_str})</div>
+                    <div><strong>Peso:</strong> {weight_str} / {target_str} {weight_status}</div>
+                </div>
+            </td>
+            <td style="padding: 16px; border-bottom: 1px solid #dee2e6; text-align: center; vertical-align: top;">
                 {rec_badge}
-                {f'<br><small style="color: #666; margin-top: 4px;">{rebalance_action}</small>' if rebalance_action else ''}
+                {f'<br><small style="color: #666; margin-top: 4px; display: block;">{rebalance_action}</small>' if rebalance_action else ''}
             </td>
         </tr>
         <tr>
-            <td colspan="3" style="padding: 16px; border-bottom: 2px solid #dee2e6; background-color: #f8f9fa;">
+            <td colspan="4" style="padding: 16px; border-bottom: 2px solid #dee2e6; background-color: #fafafa;">
                 <div style="margin-bottom: 12px;">
                     <strong style="color: #333;">Resumen:</strong>
                     <p style="margin: 8px 0; color: #555;">{news_summary}</p>
@@ -188,19 +228,37 @@ def generate_email_html(
     summary_html = ""
     if portfolio_summary:
         total_value = portfolio_summary.get("total_value", 0)
+        cash_available = portfolio_summary.get("cash_available", 0)
+        net_worth = portfolio_summary.get("net_worth", total_value + cash_available)
         day_change = portfolio_summary.get("day_change", 0)
         day_change_pct = portfolio_summary.get("day_change_pct", 0)
 
         change_color = get_color_for_change(day_change_pct)
+        # Color del texto del cambio ajustado para mejor contraste sobre fondo oscuro
+        change_text_color = "#90EE90" if day_change_pct >= 0 else "#FFB6C1"
 
         summary_html = f"""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 24px; border-radius: 8px; margin-bottom: 24px;">
-            <h2 style="margin: 0 0 8px 0;">Portfolio Total</h2>
-            <div style="font-size: 32px; font-weight: bold; margin: 8px 0;">
-                {format_currency(total_value)}
-            </div>
-            <div style="font-size: 18px; color: {change_color};">
-                {format_percentage(day_change_pct)} ({format_currency(day_change)})
+            <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start;">
+                <div style="flex: 1; min-width: 200px;">
+                    <h2 style="margin: 0 0 8px 0; font-size: 16px; opacity: 0.9;">Valor en Acciones</h2>
+                    <div style="font-size: 32px; font-weight: bold; margin: 8px 0;">
+                        {format_currency(total_value)}
+                    </div>
+                    <div style="font-size: 18px; color: {change_text_color};">
+                        {format_percentage(day_change_pct)} ({format_currency(day_change)}) hoy
+                    </div>
+                </div>
+                <div style="flex: 0 0 auto; text-align: right; padding-left: 24px;">
+                    <div style="margin-bottom: 12px;">
+                        <div style="font-size: 12px; opacity: 0.8;">Cash Disponible</div>
+                        <div style="font-size: 20px; font-weight: bold;">{format_currency(cash_available)}</div>
+                    </div>
+                    <div style="border-top: 1px solid rgba(255,255,255,0.3); padding-top: 12px;">
+                        <div style="font-size: 12px; opacity: 0.8;">Patrimonio Total</div>
+                        <div style="font-size: 24px; font-weight: bold;">{format_currency(net_worth)}</div>
+                    </div>
+                </div>
             </div>
         </div>
         """
@@ -229,9 +287,10 @@ def generate_email_html(
                 <table style="width: 100%; border-collapse: collapse; background-color: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden;">
                     <thead>
                         <tr style="background-color: #f8f9fa;">
-                            <th style="padding: 16px; text-align: left; border-bottom: 2px solid #dee2e6; font-weight: 600;">Ticker</th>
-                            <th style="padding: 16px; text-align: left; border-bottom: 2px solid #dee2e6; font-weight: 600;">Información</th>
-                            <th style="padding: 16px; text-align: center; border-bottom: 2px solid #dee2e6; font-weight: 600;">Recomendación</th>
+                            <th style="padding: 16px; text-align: left; border-bottom: 2px solid #dee2e6; font-weight: 600; width: 80px;">Ticker</th>
+                            <th style="padding: 16px; text-align: left; border-bottom: 2px solid #dee2e6; font-weight: 600;">Precio</th>
+                            <th style="padding: 16px; text-align: left; border-bottom: 2px solid #dee2e6; font-weight: 600;">Mi Posición</th>
+                            <th style="padding: 16px; text-align: center; border-bottom: 2px solid #dee2e6; font-weight: 600; width: 120px;">Acción</th>
                         </tr>
                     </thead>
                     <tbody>

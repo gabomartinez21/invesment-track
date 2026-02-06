@@ -2,6 +2,7 @@
 Módulo para agregación de noticias de múltiples fuentes.
 Mejora la confiabilidad combinando Google News, Yahoo Finance y otras fuentes.
 """
+
 import requests
 import feedparser
 import html
@@ -9,23 +10,51 @@ import time
 from typing import List, Dict
 from datetime import datetime, timedelta
 
+
 def google_news_feed(query: str, lang="es-419", gl="PE") -> str:
     """Genera URL de Google News RSS para una búsqueda."""
-    q = requests.utils.quote(f'{query} when:1d')
+    q = requests.utils.quote(f"{query} when:1d")
     return f"https://news.google.com/rss/search?q={q}&hl={lang}&gl={gl}&ceid=PE:es-419"
+
 
 def fetch_google_news(ticker: str, company: str, max_articles: int = 4) -> List[Dict]:
     """
     Obtiene noticias de Google News con filtros financieros.
     """
     positive_terms = [
-        "stock", "acciones", "share", "shares", "earnings", "resultados", "guidance",
-        "revenue", "ingresos", "EPS", "SEC", "NYSE", "NASDAQ", "dividend", "dividendo",
-        "quarter", "Q1", "Q2", "Q3", "Q4", "rating", "downgrade", "upgrade"
+        "stock",
+        "acciones",
+        "share",
+        "shares",
+        "earnings",
+        "resultados",
+        "guidance",
+        "revenue",
+        "ingresos",
+        "EPS",
+        "SEC",
+        "NYSE",
+        "NASDAQ",
+        "dividend",
+        "dividendo",
+        "quarter",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+        "rating",
+        "downgrade",
+        "upgrade",
     ]
     negative_terms = [
-        '"SoFi Stadium"', "estadio SoFi", '"Alianza para el Progreso"', "APP Perú",
-        "partido político", "fútbol", "Liga 1", "selección peruana"
+        '"SoFi Stadium"',
+        "estadio SoFi",
+        '"Alianza para el Progreso"',
+        "APP Perú",
+        "partido político",
+        "fútbol",
+        "Liga 1",
+        "selección peruana",
     ]
 
     ticker_alias = {
@@ -39,13 +68,13 @@ def fetch_google_news(ticker: str, company: str, max_articles: int = 4) -> List[
         "MU": ["Micron Technology"],
         "GOOGL": ["Alphabet", "Google"],
         "SPYG": ["SPDR Portfolio S&P 500 Growth"],
-        "VOO": ["Vanguard S&P 500 ETF"]
+        "VOO": ["Vanguard S&P 500 ETF"],
     }
 
     musts = [ticker, f'"{company}"'] + [f'"{a}"' for a in ticker_alias.get(ticker, [])]
     positives = " OR ".join(positive_terms)
-    negatives = " ".join([f'-{t}' for t in negative_terms])
-    composed = f'({" OR ".join(musts)}) ({positives}) {negatives}'
+    negatives = " ".join([f"-{t}" for t in negative_terms])
+    composed = f"({' OR '.join(musts)}) ({positives}) {negatives}"
 
     url = google_news_feed(composed)
 
@@ -56,44 +85,60 @@ def fetch_google_news(ticker: str, company: str, max_articles: int = 4) -> List[
         for e in feed.entries[:max_articles]:
             title = html.unescape(getattr(e, "title", "")).strip()
             link = getattr(e, "link", "")
-            source = getattr(e, "source", {}).get("title") if hasattr(e, "source") else "Google News"
+            source = (
+                getattr(e, "source", {}).get("title")
+                if hasattr(e, "source")
+                else "Google News"
+            )
             summary = html.unescape(getattr(e, "summary", "")).strip()
             published = getattr(e, "published", "")
 
-            items.append({
-                "title": title,
-                "link": link,
-                "source": source or "Google News",
-                "summary": summary,
-                "published": published,
-                "feed": "google_news"
-            })
+            items.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "source": source or "Google News",
+                    "summary": summary,
+                    "published": published,
+                    "feed": "google_news",
+                }
+            )
 
         return items
     except Exception as e:
         print(f"Error fetching Google News for {ticker}: {e}")
         return []
 
-def fetch_yahoo_finance_news(ticker: str, max_articles: int = 3, max_retries: int = 3) -> List[Dict]:
+
+def fetch_yahoo_finance_news(
+    ticker: str, max_articles: int = 3, max_retries: int = 3
+) -> List[Dict]:
     """
     Obtiene noticias directamente de Yahoo Finance para un ticker.
     """
     for attempt in range(max_retries):
         try:
             import yfinance as yf
+
             t = yf.Ticker(ticker)
             news = t.news or []
 
             items = []
             for article in news[:max_articles]:
-                items.append({
-                    "title": article.get("title", ""),
-                    "link": article.get("link", ""),
-                    "source": article.get("publisher", "Yahoo Finance"),
-                    "summary": article.get("summary", ""),
-                    "published": datetime.fromtimestamp(article.get("providerPublishTime", 0)).isoformat() if article.get("providerPublishTime") else "",
-                    "feed": "yahoo_finance"
-                })
+                items.append(
+                    {
+                        "title": article.get("title", ""),
+                        "link": article.get("link", ""),
+                        "source": article.get("publisher", "Yahoo Finance"),
+                        "summary": article.get("summary", ""),
+                        "published": datetime.fromtimestamp(
+                            article.get("providerPublishTime", 0)
+                        ).isoformat()
+                        if article.get("providerPublishTime")
+                        else "",
+                        "feed": "yahoo_finance",
+                    }
+                )
 
             return items
         except Exception as e:
@@ -108,7 +153,10 @@ def fetch_yahoo_finance_news(ticker: str, max_articles: int = 3, max_retries: in
 
     return []
 
-def fetch_marketaux_news(ticker: str, api_key: str = None, max_articles: int = 3) -> List[Dict]:
+
+def fetch_marketaux_news(
+    ticker: str, api_key: str = None, max_articles: int = 3
+) -> List[Dict]:
     """
     Obtiene noticias de MarketAux (alternativa premium).
     Requiere API key (gratis limitado): https://www.marketaux.com/
@@ -123,7 +171,7 @@ def fetch_marketaux_news(ticker: str, api_key: str = None, max_articles: int = 3
             "filter_entities": "true",
             "language": "en",
             "api_token": api_key,
-            "limit": max_articles
+            "limit": max_articles,
         }
 
         response = requests.get(url, params=params, timeout=10)
@@ -132,31 +180,66 @@ def fetch_marketaux_news(ticker: str, api_key: str = None, max_articles: int = 3
 
         items = []
         for article in data.get("data", [])[:max_articles]:
-            items.append({
-                "title": article.get("title", ""),
-                "link": article.get("url", ""),
-                "source": article.get("source", "MarketAux"),
-                "summary": article.get("description", ""),
-                "published": article.get("published_at", ""),
-                "sentiment": article.get("sentiment", "neutral"),
-                "feed": "marketaux"
-            })
+            items.append(
+                {
+                    "title": article.get("title", ""),
+                    "link": article.get("url", ""),
+                    "source": article.get("source", "MarketAux"),
+                    "summary": article.get("description", ""),
+                    "published": article.get("published_at", ""),
+                    "sentiment": article.get("sentiment", "neutral"),
+                    "feed": "marketaux",
+                }
+            )
 
         return items
     except Exception as e:
         print(f"Error fetching MarketAux news for {ticker}: {e}")
         return []
 
-def filter_relevant_articles(articles: List[Dict], ticker: str, company: str) -> List[Dict]:
+
+def filter_relevant_articles(
+    articles: List[Dict], ticker: str, company: str
+) -> List[Dict]:
     """
     Filtra artículos irrelevantes o spam.
     """
-    BAD_TOKENS = ("patrocinado", "sponsored", "opinión", "opinion", "op-ed", "advertorial")
-    NOISE_TOKENS = ("SoFi Stadium", "estadio SoFi", "fútbol", "partido político", "celebridad")
+    BAD_TOKENS = (
+        "patrocinado",
+        "sponsored",
+        "opinión",
+        "opinion",
+        "op-ed",
+        "advertorial",
+    )
+    NOISE_TOKENS = (
+        "SoFi Stadium",
+        "estadio SoFi",
+        "fútbol",
+        "partido político",
+        "celebridad",
+    )
     FINANCE_HINTS = (
-        "earnings", "resultados", "guidance", "ingresos", "revenue", "EPS",
-        "dividend", "dividendo", "rating", "NASDAQ", "NYSE", "SEC", "acciones",
-        "stock", "shares", "quarter", "Q1", "Q2", "Q3", "Q4"
+        "earnings",
+        "resultados",
+        "guidance",
+        "ingresos",
+        "revenue",
+        "EPS",
+        "dividend",
+        "dividendo",
+        "rating",
+        "NASDAQ",
+        "NYSE",
+        "SEC",
+        "acciones",
+        "stock",
+        "shares",
+        "quarter",
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
     )
 
     out = []
@@ -164,8 +247,8 @@ def filter_relevant_articles(articles: List[Dict], ticker: str, company: str) ->
     c_low = (company or "").lower()
 
     for a in articles:
-        title = (a.get("title") or "")
-        summ = (a.get("summary") or "")
+        title = a.get("title") or ""
+        summ = a.get("summary") or ""
         lt = title.lower()
         ls = summ.lower()
 
@@ -184,11 +267,9 @@ def filter_relevant_articles(articles: List[Dict], ticker: str, company: str) ->
 
     return out
 
+
 def aggregate_news_from_all_sources(
-    ticker: str,
-    company: str,
-    max_per_source: int = 3,
-    marketaux_api_key: str = None
+    ticker: str, company: str, max_per_source: int = 3, marketaux_api_key: str = None
 ) -> List[Dict]:
     """
     Agrega noticias de todas las fuentes disponibles y elimina duplicados.
@@ -199,13 +280,15 @@ def aggregate_news_from_all_sources(
     google_articles = fetch_google_news(ticker, company, max_per_source)
     all_articles.extend(google_articles)
 
-    # Yahoo Finance
-    yahoo_articles = fetch_yahoo_finance_news(ticker, max_per_source)
-    all_articles.extend(yahoo_articles)
+    # Yahoo Finance (deshabilitado para evitar rate limit)
+    # yahoo_articles = fetch_yahoo_finance_news(ticker, max_per_source)
+    # all_articles.extend(yahoo_articles)
 
     # MarketAux (si hay API key)
     if marketaux_api_key:
-        marketaux_articles = fetch_marketaux_news(ticker, marketaux_api_key, max_per_source)
+        marketaux_articles = fetch_marketaux_news(
+            ticker, marketaux_api_key, max_per_source
+        )
         all_articles.extend(marketaux_articles)
 
     # Filtrar relevantes
@@ -216,7 +299,9 @@ def aggregate_news_from_all_sources(
     seen_titles = set()
 
     for article in filtered:
-        title_normalized = article.get("title", "").lower().strip()[:50]  # Primeros 50 chars
+        title_normalized = (
+            article.get("title", "").lower().strip()[:50]
+        )  # Primeros 50 chars
         if title_normalized and title_normalized not in seen_titles:
             seen_titles.add(title_normalized)
             unique_articles.append(article)
@@ -224,7 +309,8 @@ def aggregate_news_from_all_sources(
     # Ordenar por fecha (más reciente primero)
     unique_articles.sort(key=lambda x: x.get("published", ""), reverse=True)
 
-    return unique_articles[:max_per_source * 2]  # Máximo total
+    return unique_articles[: max_per_source * 2]  # Máximo total
+
 
 def calculate_news_sentiment(articles: List[Dict]) -> Dict[str, any]:
     """
